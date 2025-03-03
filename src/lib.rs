@@ -73,13 +73,13 @@ impl World {
                 self.colonies[x].outgoing.retain(|&(d, t)| !(d == dir && t == y));
             }
         }
-        let outgoing = self.colonies[y].outgoing.clone();
-        for (dir, z) in outgoing {
+        // Use drain instead of clone to avoid an extra allocation.
+        let drained: Vec<(Direction, usize)> = self.colonies[y].outgoing.drain(..).collect();
+        for (dir, z) in drained {
             if let Some(links) = self.reverse_links.get_mut(&z) {
                 links.remove(&(y, dir));
             }
         }
-        self.colonies[y].outgoing.clear();
     }
 }
 
