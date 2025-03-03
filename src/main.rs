@@ -11,4 +11,3 @@ fn main() {
     println!("Simulation phase latency: {:?}", elapsed);
 }
 
-

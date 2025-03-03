@@ -14,10 +14,12 @@ pub enum Direction {
     West,
 }
 
+#[derive(Clone)]  // Derive Clone for ColonyData
 pub struct ColonyData {
     pub outgoing: Vec<(Direction, usize)>,
 }
 
+#[derive(Clone)]  // Derive Clone for World
 pub struct World {
     pub colonies: Vec<ColonyData>,
     pub alive: Vec<bool>,
@@ -120,7 +122,7 @@ pub fn update_ant(ant: &mut Ant, world: &World, rng: &mut SmallRng) {
     ant.moves += 1;
     let outgoing = &world.colonies[ant.current_colony].outgoing;
     if !outgoing.is_empty() {
-        let idx = rng.gen_range(0..outgoing.len());
+        let idx = rng.random_range(0..outgoing.len());
         let (_, target_id) = outgoing[idx];
         ant.current_colony = target_id;
     }
