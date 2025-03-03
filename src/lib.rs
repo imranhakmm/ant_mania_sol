@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::time::Instant;
+use std::sync::Mutex;
 use rand::prelude::*;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
@@ -14,12 +15,12 @@ pub enum Direction {
     West,
 }
 
-#[derive(Clone)]  // Derive Clone for ColonyData
+#[derive(Clone)]
 pub struct ColonyData {
     pub outgoing: Vec<(Direction, usize)>,
 }
 
-#[derive(Clone)]  // Derive Clone for World
+#[derive(Clone)]
 pub struct World {
     pub colonies: Vec<ColonyData>,
     pub alive: Vec<bool>,
@@ -73,7 +74,6 @@ impl World {
                 self.colonies[x].outgoing.retain(|&(d, t)| !(d == dir && t == y));
             }
         }
-        // Use drain instead of clone to avoid an extra allocation.
         let drained: Vec<(Direction, usize)> = self.colonies[y].outgoing.drain(..).collect();
         for (dir, z) in drained {
             if let Some(links) = self.reverse_links.get_mut(&z) {
@@ -83,7 +83,6 @@ impl World {
     }
 }
 
-/// Prints the final world state in the same format as the input.
 pub fn print_world(world: &World) {
     for id in 0..world.colonies.len() {
         if world.alive[id] {
@@ -128,7 +127,60 @@ pub fn update_ant(ant: &mut Ant, world: &World, rng: &mut SmallRng) {
     }
 }
 
-/// Phase 1: Build the world from the map.
+/// Fused movement and collision detection phase using par_chunks_mut.
+/// Each chunk uses its own RNG and records colony info with a global offset.
+pub fn phase_move_and_detect(ants: &mut Vec<Ant>, world: &World) -> Vec<Vec<usize>> {
+    let chunk_size = 1000;
+    // We'll accumulate (colony, ant_index) pairs per chunk.
+    let chunk_results: Mutex<Vec<Vec<(usize, usize)>>> = Mutex::new(Vec::new());
+    
+    ants.par_chunks_mut(chunk_size)
+        .enumerate()
+        .for_each(|(chunk_index, chunk)| {
+            let offset = chunk_index * chunk_size;
+            let seed = 12345 + chunk_index as u64;
+            let mut rng = SmallRng::seed_from_u64(seed);
+            let mut local_results = Vec::with_capacity(chunk.len());
+            for (i, ant) in chunk.iter_mut().enumerate() {
+                update_ant(ant, world, &mut rng);
+                if ant.alive {
+                    local_results.push((ant.current_colony, offset + i));
+                }
+            }
+            let mut guard = chunk_results.lock().unwrap();
+            guard.push(local_results);
+        });
+    
+    let mut colony_info = Vec::with_capacity(ants.len());
+    for v in chunk_results.into_inner().unwrap() {
+        colony_info.extend(v);
+    }
+    
+    // Group the ant indices by their colony.
+    let mut colony_ants: Vec<Vec<usize>> = vec![Vec::new(); world.colonies.len()];
+    for (colony, ant_index) in colony_info {
+         colony_ants[colony].push(ant_index);
+    }
+    colony_ants
+}
+
+pub fn phase_cleanup(ants: &mut Vec<Ant>, world: &mut World, colony_ants: &Vec<Vec<usize>>) {
+    let mut destroyed_colonies = Vec::new();
+    for (colony_id, ants_here) in colony_ants.iter().enumerate() {
+        if ants_here.len() >= 2 {
+            destroyed_colonies.push(colony_id);
+            for &index in ants_here {
+                ants[index].alive = false;
+            }
+            println!("{} has been destroyed by ant {} and ant {}!",
+                     world.id_to_name[colony_id], ants_here[0], ants_here[1]);
+        }
+    }
+    for colony_id in destroyed_colonies {
+        world.destroy_colony(colony_id);
+    }
+}
+
 pub fn build_world() -> World {
     let mut world = World::new();
     let map = fs::read_to_string("ant_mania_map.txt")
@@ -157,7 +209,6 @@ pub fn build_world() -> World {
     world
 }
 
-/// Phase 2: Initialize ants.
 pub fn init_ants(world: &World, n_ants: usize) -> Vec<Ant> {
     let colony_ids: Vec<usize> = (0..world.colonies.len())
         .filter(|&id| world.alive[id])
@@ -178,50 +229,9 @@ pub fn init_ants(world: &World, n_ants: usize) -> Vec<Ant> {
     ants
 }
 
-/// Phase A: Movement Phase.
-pub fn phase_movement(ants: &mut Vec<Ant>, world: &World) {
-    ants.par_iter_mut().enumerate().for_each(|(i, ant)| {
-        let mut local_rng = SmallRng::seed_from_u64(i as u64 + 12345);
-        update_ant(ant, world, &mut local_rng);
-    });
-}
-
-/// Phase B: Collision Detection Phase.
-/// Returns a vector of vectors containing indices of ants in each colony.
-pub fn phase_collision(ants: &Vec<Ant>, world: &World) -> Vec<Vec<usize>> {
-    let mut colony_ants: Vec<Vec<usize>> = vec![Vec::new(); world.colonies.len()];
-    for (index, ant) in ants.iter().enumerate() {
-        if ant.alive {
-            colony_ants[ant.current_colony].push(index);
-        }
-    }
-    colony_ants
-}
-
-/// Phase C: Cleanup Phase.
-/// Processes collisions by marking ants as dead and destroying colonies.
-pub fn phase_cleanup(ants: &mut Vec<Ant>, world: &mut World, colony_ants: &Vec<Vec<usize>>) {
-    let mut destroyed_colonies = Vec::new();
-    for (colony_id, ants_here) in colony_ants.iter().enumerate() {
-        if ants_here.len() >= 2 {
-            destroyed_colonies.push(colony_id);
-            for &index in ants_here {
-                ants[index].alive = false;
-            }
-            println!("{} has been destroyed by ant {} and ant {}!",
-                     world.id_to_name[colony_id], ants_here[0], ants_here[1]);
-        }
-    }
-    for colony_id in destroyed_colonies {
-        world.destroy_colony(colony_id);
-    }
-}
-
-/// Runs the simulation loop using the separated phases.
 pub fn simulate(ants: &mut Vec<Ant>, world: &mut World) {
     loop {
-        phase_movement(ants, world);
-        let colony_ants = phase_collision(ants, world);
+        let colony_ants = phase_move_and_detect(ants, world);
         phase_cleanup(ants, world, &colony_ants);
         let all_dead = ants.iter().all(|ant| !ant.alive);
         let all_moved_max = ants.iter().filter(|ant| ant.alive).all(|ant| ant.moves >= 10_000);
@@ -231,8 +241,6 @@ pub fn simulate(ants: &mut Vec<Ant>, world: &mut World) {
     }
 }
 
-/// Runs only the simulation phase (after world and ants are built)
-/// and returns its execution time.
 pub fn run_simulation_phase(n_ants: usize) -> std::time::Duration {
     let mut world = build_world();
     let mut ants = init_ants(&world, n_ants);
@@ -243,3 +251,4 @@ pub fn run_simulation_phase(n_ants: usize) -> std::time::Duration {
     print_world(&world);
     elapsed
 }
+
