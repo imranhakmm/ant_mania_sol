@@ -91,13 +91,13 @@ pub fn print_world(world: &World) {
                 println!("{}", name);
             } else {
                 let parts: Vec<String> = directions.iter().map(|(dir, target)| {
-                    let dir_str = match dir {
+                    let d = match dir {
                         Direction::North => "north",
                         Direction::South => "south",
                         Direction::East  => "east",
                         Direction::West  => "west",
                     };
-                    format!("{}={}", dir_str, world.id_to_name[*target])
+                    format!("{}={}", d, world.id_to_name[*target])
                 }).collect();
                 println!("{} {}", name, parts.join(" "));
             }
@@ -120,7 +120,7 @@ pub fn update_ant(ant: &mut Ant, world: &World, rng: &mut SmallRng) {
     ant.moves += 1;
     let outgoing = &world.colonies[ant.current_colony].outgoing;
     if !outgoing.is_empty() {
-        let idx = rng.random_range(0..outgoing.len());
+        let idx = rng.gen_range(0..outgoing.len());
         let (_, target_id) = outgoing[idx];
         ant.current_colony = target_id;
     }
@@ -176,59 +176,68 @@ pub fn init_ants(world: &World, n_ants: usize) -> Vec<Ant> {
     ants
 }
 
-/// Phase 3: Run the simulation loop.
+/// Phase A: Movement Phase.
+pub fn phase_movement(ants: &mut Vec<Ant>, world: &World) {
+    ants.par_iter_mut().enumerate().for_each(|(i, ant)| {
+        let mut local_rng = SmallRng::seed_from_u64(i as u64 + 12345);
+        update_ant(ant, world, &mut local_rng);
+    });
+}
+
+/// Phase B: Collision Detection Phase.
+/// Returns a vector of vectors containing indices of ants in each colony.
+pub fn phase_collision(ants: &Vec<Ant>, world: &World) -> Vec<Vec<usize>> {
+    let mut colony_ants: Vec<Vec<usize>> = vec![Vec::new(); world.colonies.len()];
+    for (index, ant) in ants.iter().enumerate() {
+        if ant.alive {
+            colony_ants[ant.current_colony].push(index);
+        }
+    }
+    colony_ants
+}
+
+/// Phase C: Cleanup Phase.
+/// Processes collisions by marking ants as dead and destroying colonies.
+pub fn phase_cleanup(ants: &mut Vec<Ant>, world: &mut World, colony_ants: &Vec<Vec<usize>>) {
+    let mut destroyed_colonies = Vec::new();
+    for (colony_id, ants_here) in colony_ants.iter().enumerate() {
+        if ants_here.len() >= 2 {
+            destroyed_colonies.push(colony_id);
+            for &index in ants_here {
+                ants[index].alive = false;
+            }
+            println!("{} has been destroyed by ant {} and ant {}!",
+                     world.id_to_name[colony_id], ants_here[0], ants_here[1]);
+        }
+    }
+    for colony_id in destroyed_colonies {
+        world.destroy_colony(colony_id);
+    }
+}
+
+/// Runs the simulation loop using the separated phases.
 pub fn simulate(ants: &mut Vec<Ant>, world: &mut World) {
     loop {
-        // Parallel movement phase.
-        ants.par_iter_mut().enumerate().for_each(|(i, ant)| {
-            let mut local_rng = SmallRng::seed_from_u64(i as u64 + 12345);
-            update_ant(ant, world, &mut local_rng);
-        });
-
-        
-        // Collision detection.
-        let mut colony_ants: Vec<Vec<usize>> = vec![Vec::new(); world.colonies.len()];
-        for (index, ant) in ants.iter().enumerate() {
-            if ant.alive {
-                colony_ants[ant.current_colony].push(index);
-            }
-        }
-        // Cleanup Phase
-        let mut destroyed_colonies = Vec::new();
-        for (colony_id, ants_here) in colony_ants.iter().enumerate() {
-            if ants_here.len() >= 2 {
-                destroyed_colonies.push(colony_id);
-                for &index in ants_here {
-                    ants[index].alive = false;
-                }
-                println!("{} has been destroyed by ant {} and ant {}!",
-                         world.id_to_name[colony_id], ants_here[0], ants_here[1]);
-            }
-        }
-        for colony_id in destroyed_colonies {
-            world.destroy_colony(colony_id);
-        }
-
-        // Termination Condition
+        phase_movement(ants, world);
+        let colony_ants = phase_collision(ants, world);
+        phase_cleanup(ants, world, &colony_ants);
         let all_dead = ants.iter().all(|ant| !ant.alive);
-        let all_moved_max = ants.iter()
-            .filter(|ant| ant.alive)
-            .all(|ant| ant.moves >= 10_000);
+        let all_moved_max = ants.iter().filter(|ant| ant.alive).all(|ant| ant.moves >= 10_000);
         if all_dead || all_moved_max {
             break;
         }
     }
 }
 
-/// Runs only the simulation phase (after world and ants are built) and returns its execution time.
+/// Runs only the simulation phase (after world and ants are built)
+/// and returns its execution time.
 pub fn run_simulation_phase(n_ants: usize) -> std::time::Duration {
     let mut world = build_world();
     let mut ants = init_ants(&world, n_ants);
     let start = Instant::now();
     simulate(&mut ants, &mut world);
-    let elapsed=start.elapsed();
-    // Print the final state of the world (hives remaining)
+    let elapsed = start.elapsed();
     println!("Final world state:");
     print_world(&world);
-    elapsed 
+    elapsed
 }
