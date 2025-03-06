@@ -251,4 +251,3 @@ pub fn run_simulation_phase(n_ants: usize) -> std::time::Duration {
     print_world(&world);
     elapsed
 }
-
